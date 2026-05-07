@@ -1,0 +1,10 @@
+{
+  "r.rterm.windows": "C:\\Program Files\\R\\R-4.5.3\\bin\\x64\\R.exe",
+  "r.rpath.windows": "C:\\Program Files\\R\\R-4.5.3\\bin\\x64\\R.exe",
+  "r.sessionWatcher": true,
+  "r.plot.useHttpgd": true,
+  "r.alwaysUseActiveTerminal": true,
+  "[r]": {
+    "editor.defaultFormatter": "REditorSupport.r"
+  }
+}
