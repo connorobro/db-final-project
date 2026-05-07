@@ -4,7 +4,7 @@ library(RPostgres)
 library(dplyr)
 
 # Parse Census JSON (array of arrays)
-raw <- fromJSON("C:/Users/conno/OneDrive/Desktop/db final project/acs_county.json")
+raw <- fromJSON("acs_county.json")
 df  <- as.data.frame(raw[-1, ], stringsAsFactors = FALSE)
 names(df) <- c("county_name", "median_rent", "median_income", "state_fips", "county_fips")
 

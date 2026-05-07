@@ -1,37 +1,48 @@
 # ============================================================
 #  US County-Level Rent vs. Income — Cost of Living Explorer
-#  Database: PostgreSQL (university db, cost_of_living table)
-#  Source:   2022 ACS 5-Year Estimates (Census Bureau API)
-#  All data queries use SQL via DBI / RPostgres
+#  Source: US Census ACS 2020-2024 5-Year Estimates (API)
 # ============================================================
 
 library(shiny)
-library(DBI)
-library(RPostgres)
 library(ggplot2)
 library(plotly)
 library(dplyr)
 library(scales)
 library(DT)
+library(jsonlite)
 
-# ------------------------------------------------------------------
-# DB connection (PostgreSQL — university database)
-# ------------------------------------------------------------------
-db_con <- function() {
-  dbConnect(
-    RPostgres::Postgres(),
-    dbname   = "university",
-    host     = "localhost",
-    port     = 5432,
-    user     = "postgres",
-    password = "postgres"
+fetch_acs_county_data <- function(year) {
+  url <- paste0(
+    "https://api.census.gov/data/",
+    year,
+    "/acs/acs5?get=NAME,B25064_001E,B19013_001E&for=county:*"
   )
+
+  raw <- fromJSON(url)
+  df <- as.data.frame(raw[-1, ], stringsAsFactors = FALSE)
+  names(df) <- raw[1, ]
+
+  df <- df %>%
+    mutate(
+      median_rent    = as.numeric(B25064_001E),
+      median_income  = as.numeric(B19013_001E),
+      geoid          = paste0(state, county),
+      county         = sub(" County$", "", sub(",.*", "", NAME)),
+      state          = sub(".*, ", "", NAME),
+      annual_rent    = median_rent * 12,
+      rent_to_income = round((annual_rent / median_income) * 100, 1)
+    ) %>%
+    filter(median_rent > 0, median_income > 0) %>%
+    select(geoid, county, state, median_rent, median_income,
+           annual_rent, rent_to_income)
+
+  df
 }
 
-# Pull distinct state list for the filter dropdown (SQL query)
-con  <- db_con()
-all_states <- dbGetQuery(con, "SELECT DISTINCT state FROM cost_of_living ORDER BY state")$state
-dbDisconnect(con)
+# Pull distinct state list for the filter dropdown (from ACS API)
+temp_df <- fetch_acs_county_data(2022)  # Use 2022 as reference year
+all_states <- sort(unique(temp_df$state))
+available_years <- 2020:2024
 
 # ------------------------------------------------------------------
 # UI
@@ -55,25 +66,28 @@ ui <- fluidPage(
   titlePanel(div(
     h2("US County Rent vs. Income — Cost of Living Explorer"),
     p(style = "color:#888; margin-top:-8px; font-size:13px;",
-      "3,212 counties | 2022 ACS 5-Year Estimates | PostgreSQL backend")
+      "3,212 counties | 2020-2024 ACS 5-Year Estimates | Census API backend")
   )),
 
   sidebarLayout(
     sidebarPanel(
       width = 3,
+      selectInput("year_filter", "Select Year:",
+                  choices  = as.character(available_years),
+                  selected = "2022"),
       selectInput("state_filter", "Filter by State:",
                   choices  = c("All States", all_states),
                   selected = "All States"),
       sliderInput("top_n", "Top N burdened counties:",
                   min = 5, max = 40, value = 15, step = 5),
       hr(),
-      h5(style = "font-weight:bold; margin-bottom:4px;", "Last SQL Query"),
-      uiOutput("sql_display"),
+      h5(style = "font-weight:bold; margin-bottom:4px;", "API Query"),
+      uiOutput("api_display"),
       hr(),
       tags$p(style = "font-size:11px; color:#aaa;",
-        "Data: US Census ACS 2022 (B25064, B19013).",
+        "Data: US Census ACS 2020-2024 (B25064, B19013).",
         tags$br(),
-        "Stored in PostgreSQL — all charts query live from DB.")
+        "Fetched live from Census API — all charts query live from API.")
     ),
 
     mainPanel(
@@ -100,61 +114,57 @@ ui <- fluidPage(
 # ------------------------------------------------------------------
 server <- function(input, output, session) {
 
-  # Reactive: run SQL query against PostgreSQL based on state filter
-  county_data <- reactive({
-    con <- db_con()
-    on.exit(dbDisconnect(con))
+  year_cache <- reactiveVal(list())
 
-    if (input$state_filter == "All States") {
-      sql <- "
-        SELECT geoid, county, state,
-               median_rent, median_income,
-               annual_rent, rent_to_income
-        FROM cost_of_living
-        ORDER BY rent_to_income DESC"
+  # Reactive: load ACS data for the selected year and state filter
+  county_data <- reactive({
+    year <- as.integer(input$year_filter)
+    cached <- year_cache()
+
+    if (!is.null(cached[[as.character(year)]])) {
+      df <- cached[[as.character(year)]]
     } else {
-      sql <- paste0("
-        SELECT geoid, county, state,
-               median_rent, median_income,
-               annual_rent, rent_to_income
-        FROM cost_of_living
-        WHERE state = '", input$state_filter, "'
-        ORDER BY rent_to_income DESC")
+      df <- fetch_acs_county_data(year)
+      cached[[as.character(year)]] <- df
+      year_cache(cached)
     }
 
-    last_sql(sql)
-    dbGetQuery(con, sql)
+    if (input$state_filter != "All States") {
+      df <- df %>% filter(state == input$state_filter)
+    }
+
+    df <- df %>%
+      arrange(desc(rent_to_income), desc(median_rent), desc(median_income))
+
+    last_sql(paste0(
+      "Census API request: https://api.census.gov/data/",
+      year,
+      "/acs/acs5?get=NAME,B25064_001E,B19013_001E&for=county:*"
+    ))
+
+    df
   })
 
   last_sql <- reactiveVal("")
 
-  # Show the live SQL in the sidebar
-  output$sql_display <- renderUI({
+  # Show the live API query in the sidebar
+  output$api_display <- renderUI({
     div(class = "sql-box", last_sql())
   })
 
-  # Summary stats via SQL aggregate query
+  # Summary stats from the selected year/state data
   stats <- reactive({
-    con <- db_con()
-    on.exit(dbDisconnect(con))
+    df <- county_data()
+    req(nrow(df) > 0)
 
-    if (input$state_filter == "All States") {
-      where <- ""
-    } else {
-      where <- paste0("WHERE state = '", input$state_filter, "'")
-    }
-
-    sql <- paste0("
-      SELECT
-        COUNT(*)                        AS n,
-        ROUND(AVG(median_rent))         AS avg_rent,
-        ROUND(AVG(median_income))       AS avg_income,
-        ROUND(AVG(rent_to_income), 1)   AS avg_ratio,
-        ROUND(100.0 * SUM(CASE WHEN rent_to_income >= 30 THEN 1 ELSE 0 END)
-              / COUNT(*), 0)            AS pct_burdened
-      FROM cost_of_living ", where)
-
-    dbGetQuery(con, sql)
+    df %>%
+      summarise(
+        n = n(),
+        avg_rent = round(mean(median_rent)),
+        avg_income = round(mean(median_income)),
+        avg_ratio = round(mean(rent_to_income), 1),
+        pct_burdened = round(100.0 * sum(if_else(rent_to_income >= 30, 1, 0)) / n(), 0)
+      )
   })
 
   # Metric boxes
@@ -209,26 +219,16 @@ server <- function(input, output, session) {
       layout(legend = list(orientation="v", x=1.02, y=0.5))
   })
 
-  # Bar: top N most burdened counties (SQL query with LIMIT)
+  # Bar: top N most burdened counties
   output$bar_top <- renderPlotly({
-    con <- db_con()
-    on.exit(dbDisconnect(con))
-
     n <- input$top_n
-    where <- if (input$state_filter == "All States") ""
-             else paste0("WHERE state = '", input$state_filter, "'")
+    df <- county_data() %>%
+      arrange(desc(rent_to_income), desc(median_rent), desc(median_income)) %>%
+      slice_head(n = n)
 
-    sql <- paste0("
-      SELECT county || ', ' || state AS label,
-             rent_to_income, median_rent, median_income
-      FROM cost_of_living
-      ", where, "
-      ORDER BY rent_to_income DESC
-      LIMIT ", n)
-
-    df <- dbGetQuery(con, sql)
     req(nrow(df) > 0)
 
+    df$label <- paste0(df$county, ", ", df$state)
     df$tip <- paste0(
       "<b>", df$label, "</b><br>",
       "Burden: ", df$rent_to_income, "%<br>",
@@ -268,7 +268,8 @@ server <- function(input, output, session) {
         rownames = FALSE,
         filter   = "top",
         options  = list(pageLength = 12, scrollX = TRUE,
-                        order = list(list(4, "desc")))
+                        order = list(list(4, "desc")),
+                        columnDefs = list(list(type = 'num', targets = 4)))
       ) %>%
       formatStyle(
         "Rent Burden (%)",
