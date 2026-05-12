@@ -1,0 +1,62 @@
+Loading required package: shiny
+
+Attaching package: 'plotly'
+
+The following object is masked from 'package:ggplot2':
+
+    last_plot
+
+The following object is masked from 'package:stats':
+
+    filter
+
+The following object is masked from 'package:graphics':
+
+    layout
+
+
+Attaching package: 'dplyr'
+
+The following objects are masked from 'package:stats':
+
+    filter, lag
+
+The following objects are masked from 'package:base':
+
+    intersect, setdiff, setequal, union
+
+
+Attaching package: 'DT'
+
+The following objects are masked from 'package:shiny':
+
+    dataTableOutput, renderDataTable
+
+
+Attaching package: 'jsonlite'
+
+The following object is masked from 'package:shiny':
+
+    validate
+
+Warning in open.connection(con, "rb") :
+  URL 'https://api.census.gov/data/2022/acs/acs5?get=NAME,B25064_001E,B19013_001E&for=county:*': status was 'Could not connect to server'
+Census API request failed for 2022: cannot open the connection to 'https://api.census.gov/data/2022/acs/acs5?get=NAME,B25064_001E,B19013_001E&for=county:*'
+Using local fallback data from acs_county.json.
+
+Listening on http://127.0.0.1:3838
+Warning in open.connection(con, "rb") :
+  URL 'https://api.census.gov/data/2022/acs/acs5?get=NAME,B25064_001E,B19013_001E&for=county:*': status was 'Could not connect to server'
+Census API request failed for 2022: cannot open the connection to 'https://api.census.gov/data/2022/acs/acs5?get=NAME,B25064_001E,B19013_001E&for=county:*'
+Using local fallback data from acs_county.json.
+`geom_smooth()` using formula = 'y ~ x'
+`geom_smooth()` using formula = 'y ~ x'
+Warning in open.connection(con, "rb") :
+  URL 'https://api.census.gov/data/2022/acs/acs5?get=NAME,B25064_001E,B19013_001E&for=county:*': status was 'Could not connect to server'
+Census API request failed for 2022: cannot open the connection to 'https://api.census.gov/data/2022/acs/acs5?get=NAME,B25064_001E,B19013_001E&for=county:*'
+Using local fallback data from acs_county.json.
+Warning in open.connection(con, "rb") :
+  URL 'https://api.census.gov/data/2022/acs/acs5?get=NAME,B25064_001E,B19013_001E&for=county:*': status was 'Could not connect to server'
+Census API request failed for 2022: cannot open the connection to 'https://api.census.gov/data/2022/acs/acs5?get=NAME,B25064_001E,B19013_001E&for=county:*'
+Using local fallback data from acs_county.json.
+`geom_smooth()` using formula = 'y ~ x'

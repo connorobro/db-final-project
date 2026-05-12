@@ -1,0 +1,2 @@
+    shiny tidyverse    plotly        DT  jsonlite       DBI   RSQLite 
+     TRUE      TRUE      TRUE      TRUE      TRUE      TRUE      TRUE 
