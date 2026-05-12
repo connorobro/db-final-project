@@ -10,6 +10,8 @@ library(dplyr)
 library(scales)
 library(DT)
 library(jsonlite)
+library(DBI)
+library(RPostgres)
 
 state_lookup <- data.frame(
   state = c(state.name, "District of Columbia", "Puerto Rico"),
@@ -17,16 +19,28 @@ state_lookup <- data.frame(
   stringsAsFactors = FALSE
 )
 
-fetch_acs_county_data <- function(year) {
-  url <- paste0(
-    "https://api.census.gov/data/",
-    year,
-    "/acs/acs5?get=NAME,B25064_001E,B19013_001E&for=county:*"
-  )
+census_api_key <- Sys.getenv("CENSUS_API_KEY", unset = "")
+use_census_api <- nzchar(census_api_key)
 
-  raw <- fromJSON(url)
-  df <- as.data.frame(raw[-1, ], stringsAsFactors = FALSE)
-  names(df) <- raw[1, ]
+fetch_acs_county_data <- function(year) {
+  if (!use_census_api && year == 2022 && file.exists("acs_county.json")) {
+    raw <- fromJSON("acs_county.json")
+    df <- as.data.frame(raw[-1, ], stringsAsFactors = FALSE)
+    names(df) <- c("NAME", "B25064_001E", "B19013_001E", "state", "county")
+  } else if (use_census_api) {
+    url <- paste0(
+      "https://api.census.gov/data/",
+      year,
+      "/acs/acs5?get=NAME,B25064_001E,B19013_001E&for=county:*&key=",
+      census_api_key
+    )
+
+    raw <- fromJSON(url)
+    df <- as.data.frame(raw[-1, ], stringsAsFactors = FALSE)
+    names(df) <- raw[1, ]
+  } else {
+    stop("No Census API key found and no local 2022 data available.")
+  }
 
   df <- df %>%
     mutate(
@@ -38,11 +52,13 @@ fetch_acs_county_data <- function(year) {
       county         = sub(" County$", "", sub(",.*", "", NAME)),
       state          = sub(".*, ", "", NAME),
       annual_rent    = median_rent * 12,
-      rent_to_income = round((annual_rent / median_income) * 100, 1)
+      rent_to_income = round((annual_rent / median_income) * 100, 1),
+      state_abbr     = state_lookup$state_abbr[match(state, state_lookup$state)],
+      county_sequence = as.integer(substr(geoid, 3, 5))
     ) %>%
     filter(median_rent > 0, median_income > 0) %>%
-    select(geoid, state_fips, county_fips, county, state, median_rent, median_income,
-           annual_rent, rent_to_income)
+    select(year = year, geoid, state_fips, county_fips, county, state, state_abbr,
+           county_sequence, median_rent, median_income, annual_rent, rent_to_income)
 
   df
 }
@@ -75,6 +91,109 @@ load_jobmarket_data <- function(path = "county_wages_jobmarket_2023.csv") {
       unemployment_rate,
       job_median_household_income
     )
+}
+
+# PostgreSQL helper functions
+
+db_connect <- function() {
+  dbConnect(
+    RPostgres::Postgres(),
+    dbname   = "university",
+    host     = "localhost",
+    port     = 5432,
+    user     = "postgres",
+    password = "postgres"
+  )
+}
+
+fetch_acs_county_data_db <- function(year, state_filter = "All States") {
+  if (state_filter != "All States") {
+    sql <- "SELECT geoid, state_fips, county_fips, county, state, median_rent, median_income, annual_rent, rent_to_income
+            FROM cost_of_living
+            WHERE year = $1 AND state = $2
+            ORDER BY rent_to_income DESC, median_rent DESC, median_income DESC"
+    dbGetQuery(db_con, sql, params = list(year, state_filter))
+  } else {
+    sql <- "SELECT geoid, state_fips, county_fips, county, state, median_rent, median_income, annual_rent, rent_to_income
+            FROM cost_of_living
+            WHERE year = $1
+            ORDER BY rent_to_income DESC, median_rent DESC, median_income DESC"
+    dbGetQuery(db_con, sql, params = list(year))
+  }
+}
+
+fetch_comparison_data_db <- function(year, state_filter = "All States") {
+  if (state_filter != "All States") {
+    sql <- "SELECT c.geoid, c.state_fips, c.county_fips, c.county, c.state,
+                     c.median_rent, c.median_income, c.annual_rent, c.rent_to_income,
+                     c.state_abbr, c.county_sequence,
+                     j.job_geoid, j.job_county_name, j.state_abbr AS job_state_abbr,
+                     j.job_year, j.num_establishments, j.total_employment, j.total_wages,
+                     j.taxable_wages, j.avg_weekly_wage, j.avg_annual_pay,
+                     j.employment_yoy_pct_change, j.wage_yoy_pct_change,
+                     j.location_quotient_employment, j.unemployment_rate,
+                     j.job_median_household_income
+            FROM cost_of_living c
+            INNER JOIN job_market j
+              ON c.state_abbr = j.state_abbr
+             AND c.county_sequence = j.county_sequence
+            WHERE c.year = $1 AND c.state = $2
+            ORDER BY c.rent_to_income DESC, j.avg_annual_pay DESC"
+    dbGetQuery(db_con, sql, params = list(year, state_filter))
+  } else {
+    sql <- "SELECT c.geoid, c.state_fips, c.county_fips, c.county, c.state,
+                     c.median_rent, c.median_income, c.annual_rent, c.rent_to_income,
+                     c.state_abbr, c.county_sequence,
+                     j.job_geoid, j.job_county_name, j.state_abbr AS job_state_abbr,
+                     j.job_year, j.num_establishments, j.total_employment, j.total_wages,
+                     j.taxable_wages, j.avg_weekly_wage, j.avg_annual_pay,
+                     j.employment_yoy_pct_change, j.wage_yoy_pct_change,
+                     j.location_quotient_employment, j.unemployment_rate,
+                     j.job_median_household_income
+            FROM cost_of_living c
+            INNER JOIN job_market j
+              ON c.state_abbr = j.state_abbr
+             AND c.county_sequence = j.county_sequence
+            WHERE c.year = $1
+            ORDER BY c.rent_to_income DESC, j.avg_annual_pay DESC"
+    dbGetQuery(db_con, sql, params = list(year))
+  }
+}
+
+check_db_available <- function(con) {
+  if (is.null(con)) return(FALSE)
+  ok <- tryCatch({
+    dbGetQuery(con, "SELECT 1 FROM cost_of_living LIMIT 1")
+    dbGetQuery(con, "SELECT 1 FROM job_market LIMIT 1")
+    TRUE
+  }, error = function(e) {
+    warning("Database schema unavailable: ", e$message)
+    FALSE
+  })
+  if (!ok) {
+    dbDisconnect(con)
+    return(FALSE)
+  }
+  TRUE
+}
+
+# Attempt to use PostgreSQL if configured
+
+db_con <- tryCatch(db_connect(), error = function(e) {
+  warning("Could not connect to PostgreSQL: ", e$message)
+  NULL
+})
+db_available <- check_db_available(db_con)
+
+if (db_available) {
+  all_states <- sort(dbGetQuery(db_con, "SELECT DISTINCT state FROM cost_of_living ORDER BY state")$state)
+  available_years <- dbGetQuery(db_con, "SELECT DISTINCT year FROM cost_of_living ORDER BY year")$year
+  job_data <- NULL
+} else {
+  temp_df <- fetch_acs_county_data(2022)
+  all_states <- sort(unique(temp_df$state))
+  available_years <- if (use_census_api) 2020:2024 else 2022
+  job_data <- load_jobmarket_data()
 }
 
 housing_metric_choices <- c(
@@ -144,12 +263,6 @@ axis_label_for <- function(metric) {
   scales::comma
 }
 
-# Pull distinct state list for the filter dropdown (from ACS API)
-temp_df <- fetch_acs_county_data(2022)  # Use 2022 as reference year
-all_states <- sort(unique(temp_df$state))
-available_years <- 2020:2024
-job_data <- load_jobmarket_data()
-
 # ------------------------------------------------------------------
 # UI
 # ------------------------------------------------------------------
@@ -201,7 +314,7 @@ ui <- fluidPage(
       tags$p(style = "font-size:11px; color:#aaa;",
         "Data: US Census ACS 2020-2024 (B25064, B19013).",
         tags$br(),
-        "Fetched live from Census API — all charts query live from API.")
+        "Uses PostgreSQL when available; otherwise fetches live from the Census API.")
     ),
 
     mainPanel(
@@ -256,35 +369,48 @@ server <- function(input, output, session) {
   # Reactive: load ACS data for the selected year and state filter
   county_data <- reactive({
     year <- as.integer(input$year_filter)
-    cached <- year_cache()
 
-    if (!is.null(cached[[as.character(year)]])) {
-      df <- cached[[as.character(year)]]
+    if (db_available) {
+      df <- fetch_acs_county_data_db(year, input$state_filter)
+      last_sql(paste0("SQL query: cost_of_living year=", year,
+                      if (input$state_filter != "All States")
+                        paste0(" state=", input$state_filter) else ""))
     } else {
-      df <- fetch_acs_county_data(year)
-      cached[[as.character(year)]] <- df
-      year_cache(cached)
+      cached <- year_cache()
+
+      if (!is.null(cached[[as.character(year)]])) {
+        df <- cached[[as.character(year)]]
+      } else {
+        df <- fetch_acs_county_data(year)
+        cached[[as.character(year)]] <- df
+        year_cache(cached)
+      }
+
+      if (input$state_filter != "All States") {
+        df <- df %>% filter(state == input$state_filter)
+      }
+
+      df <- df %>%
+        arrange(desc(rent_to_income), desc(median_rent), desc(median_income))
+
+      if (use_census_api) {
+        last_sql(paste0(
+          "Census API request: https://api.census.gov/data/",
+          year,
+          "/acs/acs5?get=NAME,B25064_001E,B19013_001E&for=county:*&key=",
+          census_api_key
+        ))
+      } else {
+        last_sql("Local ACS dataset: acs_county.json (2022)")
+      }
     }
-
-    if (input$state_filter != "All States") {
-      df <- df %>% filter(state == input$state_filter)
-    }
-
-    df <- df %>%
-      arrange(desc(rent_to_income), desc(median_rent), desc(median_income))
-
-    last_sql(paste0(
-      "Census API request: https://api.census.gov/data/",
-      year,
-      "/acs/acs5?get=NAME,B25064_001E,B19013_001E&for=county:*"
-    ))
 
     df
   })
 
   last_sql <- reactiveVal("")
 
-  # Show the live API query in the sidebar
+  # Show the live SQL/API query in the sidebar
   output$api_display <- renderUI({
     div(class = "sql-box", last_sql())
   })
@@ -305,17 +431,21 @@ server <- function(input, output, session) {
   })
 
   comparison_data <- reactive({
-    acs_for_join <- county_data() %>%
-      left_join(state_lookup, by = "state") %>%
-      filter(!is.na(state_abbr)) %>%
-      group_by(state_abbr) %>%
-      arrange(geoid, .by_group = TRUE) %>%
-      mutate(county_sequence = row_number()) %>%
-      ungroup()
+    if (db_available) {
+      df <- fetch_comparison_data_db(as.integer(input$year_filter), input$state_filter)
+    } else {
+      acs_for_join <- county_data() %>%
+        left_join(state_lookup, by = "state") %>%
+        filter(!is.na(state_abbr)) %>%
+        group_by(state_abbr) %>%
+        arrange(geoid, .by_group = TRUE) %>%
+        mutate(county_sequence = row_number()) %>%
+        ungroup()
 
-    df <- acs_for_join %>%
-      inner_join(job_data, by = c("state_abbr", "county_sequence")) %>%
-      arrange(desc(rent_to_income), desc(avg_annual_pay))
+      df <- acs_for_join %>%
+        inner_join(job_data, by = c("state_abbr", "county_sequence")) %>%
+        arrange(desc(rent_to_income), desc(avg_annual_pay))
+    }
 
     req(nrow(df) > 0)
     df
