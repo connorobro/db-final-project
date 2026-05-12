@@ -11,6 +11,12 @@ library(scales)
 library(DT)
 library(jsonlite)
 
+state_lookup <- data.frame(
+  state = c(state.name, "District of Columbia", "Puerto Rico"),
+  state_abbr = c(state.abb, "DC", "PR"),
+  stringsAsFactors = FALSE
+)
+
 fetch_acs_county_data <- function(year) {
   url <- paste0(
     "https://api.census.gov/data/",
@@ -24,25 +30,125 @@ fetch_acs_county_data <- function(year) {
 
   df <- df %>%
     mutate(
+      state_fips     = state,
+      county_fips    = county,
       median_rent    = as.numeric(B25064_001E),
       median_income  = as.numeric(B19013_001E),
-      geoid          = paste0(state, county),
+      geoid          = paste0(state_fips, county_fips),
       county         = sub(" County$", "", sub(",.*", "", NAME)),
       state          = sub(".*, ", "", NAME),
       annual_rent    = median_rent * 12,
       rent_to_income = round((annual_rent / median_income) * 100, 1)
     ) %>%
     filter(median_rent > 0, median_income > 0) %>%
-    select(geoid, county, state, median_rent, median_income,
+    select(geoid, state_fips, county_fips, county, state, median_rent, median_income,
            annual_rent, rent_to_income)
 
   df
+}
+
+load_jobmarket_data <- function(path = "county_wages_jobmarket_2023.csv") {
+  read.csv(path, stringsAsFactors = FALSE,
+           colClasses = c(county_fips = "character")) %>%
+    mutate(
+      geoid = sprintf("%05d", as.integer(county_fips)),
+      job_geoid = geoid,
+      county_sequence = as.integer(substr(geoid, 3, 5)),
+      job_year = year,
+      job_median_household_income = median_household_income
+    ) %>%
+    select(
+      job_geoid,
+      county_sequence,
+      job_county_name = county_name,
+      state_abbr,
+      job_year,
+      num_establishments,
+      total_employment,
+      total_wages,
+      taxable_wages,
+      avg_weekly_wage,
+      avg_annual_pay,
+      employment_yoy_pct_change,
+      wage_yoy_pct_change,
+      location_quotient_employment,
+      unemployment_rate,
+      job_median_household_income
+    )
+}
+
+housing_metric_choices <- c(
+  "Monthly Rent" = "median_rent",
+  "Household Income" = "median_income",
+  "Annual Rent" = "annual_rent",
+  "Rent Burden" = "rent_to_income"
+)
+
+job_metric_choices <- c(
+  "Average Annual Pay" = "avg_annual_pay",
+  "Average Weekly Wage" = "avg_weekly_wage",
+  "Unemployment Rate" = "unemployment_rate",
+  "Total Employment" = "total_employment",
+  "Business Establishments" = "num_establishments",
+  "Employment YoY Change" = "employment_yoy_pct_change",
+  "Wage YoY Change" = "wage_yoy_pct_change",
+  "Employment Location Quotient" = "location_quotient_employment",
+  "Job Market Household Income" = "job_median_household_income"
+)
+
+metric_label <- function(metric, choices) {
+  names(choices)[match(metric, unname(choices))]
+}
+
+percent_metrics <- c(
+  "rent_to_income",
+  "unemployment_rate",
+  "employment_yoy_pct_change",
+  "wage_yoy_pct_change"
+)
+
+currency_metrics <- c(
+  "median_rent",
+  "median_income",
+  "annual_rent",
+  "avg_weekly_wage",
+  "avg_annual_pay",
+  "total_wages",
+  "taxable_wages",
+  "job_median_household_income"
+)
+
+format_metric_values <- function(x, metric) {
+  if (metric %in% currency_metrics) {
+    return(scales::dollar(round(x)))
+  }
+  if (metric %in% percent_metrics) {
+    return(paste0(round(x, 1), "%"))
+  }
+  if (metric == "location_quotient_employment") {
+    return(round(x, 2))
+  }
+  scales::comma(round(x))
+}
+
+axis_label_for <- function(metric) {
+  if (metric %in% currency_metrics) {
+    return(scales::dollar)
+  }
+  if (metric %in% percent_metrics) {
+    return(function(x) paste0(x, "%"))
+  }
+  if (metric == "location_quotient_employment") {
+    return(function(x) round(x, 2))
+  }
+  scales::comma
 }
 
 # Pull distinct state list for the filter dropdown (from ACS API)
 temp_df <- fetch_acs_county_data(2022)  # Use 2022 as reference year
 all_states <- sort(unique(temp_df$state))
 available_years <- 2020:2024
+job_data <- load_jobmarket_data()
 
 # ------------------------------------------------------------------
 # UI
@@ -74,12 +180,20 @@ ui <- fluidPage(
       width = 3,
       selectInput("year_filter", "Select Year:",
                   choices  = as.character(available_years),
-                  selected = "2022"),
+                  selected = "2023"),
       selectInput("state_filter", "Filter by State:",
                   choices  = c("All States", all_states),
                   selected = "All States"),
       sliderInput("top_n", "Top N burdened counties:",
                   min = 5, max = 40, value = 15, step = 5),
+      hr(),
+      h5(style = "font-weight:bold; margin-bottom:4px;", "Comparison Metrics"),
+      selectInput("housing_metric", "ACS metric:",
+                  choices = housing_metric_choices,
+                  selected = "rent_to_income"),
+      selectInput("job_metric", "Job-market metric:",
+                  choices = job_metric_choices,
+                  selected = "avg_annual_pay"),
       hr(),
       h5(style = "font-weight:bold; margin-bottom:4px;", "API Query"),
       uiOutput("api_display"),
@@ -92,19 +206,42 @@ ui <- fluidPage(
 
     mainPanel(
       width = 9,
-      fluidRow(
-        column(3, uiOutput("box_counties")),
-        column(3, uiOutput("box_rent")),
-        column(3, uiOutput("box_income")),
-        column(3, uiOutput("box_ratio"))
-      ),
-      br(),
-      fluidRow(
-        column(6, plotlyOutput("scatter", height = "380px")),
-        column(6, plotlyOutput("bar_top", height = "380px"))
-      ),
-      hr(),
-      DTOutput("tbl")
+      tabsetPanel(
+        tabPanel(
+          "Cost Overview",
+          br(),
+          fluidRow(
+            column(3, uiOutput("box_counties")),
+            column(3, uiOutput("box_rent")),
+            column(3, uiOutput("box_income")),
+            column(3, uiOutput("box_ratio"))
+          ),
+          br(),
+          fluidRow(
+            column(6, plotlyOutput("scatter", height = "380px")),
+            column(6, plotlyOutput("bar_top", height = "380px"))
+          ),
+          hr(),
+          DTOutput("tbl")
+        ),
+        tabPanel(
+          "Job Market Compare",
+          br(),
+          fluidRow(
+            column(3, uiOutput("box_joined_counties")),
+            column(3, uiOutput("box_metric_correlation")),
+            column(3, uiOutput("box_avg_job_metric")),
+            column(3, uiOutput("box_job_year"))
+          ),
+          br(),
+          fluidRow(
+            column(7, plotlyOutput("job_scatter", height = "430px")),
+            column(5, plotlyOutput("job_corr_bar", height = "430px"))
+          ),
+          hr(),
+          DTOutput("job_tbl")
+        )
+      )
     )
   )
 )
@@ -165,6 +302,38 @@ server <- function(input, output, session) {
         avg_ratio = round(mean(rent_to_income), 1),
         pct_burdened = round(100.0 * sum(if_else(rent_to_income >= 30, 1, 0)) / n(), 0)
       )
+  })
+
+  comparison_data <- reactive({
+    acs_for_join <- county_data() %>%
+      left_join(state_lookup, by = "state") %>%
+      filter(!is.na(state_abbr)) %>%
+      group_by(state_abbr) %>%
+      arrange(geoid, .by_group = TRUE) %>%
+      mutate(county_sequence = row_number()) %>%
+      ungroup()
+
+    df <- acs_for_join %>%
+      inner_join(job_data, by = c("state_abbr", "county_sequence")) %>%
+      arrange(desc(rent_to_income), desc(avg_annual_pay))
+
+    req(nrow(df) > 0)
+    df
+  })
+
+  selected_correlation <- reactive({
+    df <- comparison_data()
+    housing_metric <- input$housing_metric
+    job_metric <- input$job_metric
+    complete_rows <- complete.cases(df[[housing_metric]], df[[job_metric]])
+
+    if (sum(complete_rows) < 2) {
+      return(NA_real_)
+    }
+
+    cor(df[[housing_metric]][complete_rows],
+        df[[job_metric]][complete_rows],
+        use = "complete.obs")
   })
 
   # Metric boxes
@@ -282,6 +451,167 @@ server <- function(input, output, session) {
         "Rent Burden (%)",
         color = styleInterval(c(25, 30, 35),
                               c("#155724","#856404","#721c24","#491217"))
+      )
+  })
+
+  output$box_joined_counties <- renderUI({
+    df <- comparison_data()
+    div(class="mbox", tags$h5("Matched Counties"),
+        tags$p(scales::comma(nrow(df))))
+  })
+
+  output$box_metric_correlation <- renderUI({
+    cor_value <- selected_correlation()
+    col <- if (is.na(cor_value)) "#888" else if (cor_value >= 0) "#2166ac" else "#d73027"
+    label <- if (is.na(cor_value)) "n/a" else round(cor_value, 2)
+
+    div(class="mbox", style=paste0("border-left-color:", col, ";"),
+        tags$h5("Correlation"),
+        tags$p(style=paste0("color:", col, ";"), label))
+  })
+
+  output$box_avg_job_metric <- renderUI({
+    df <- comparison_data()
+    job_metric <- input$job_metric
+    job_label <- metric_label(job_metric, job_metric_choices)
+    avg_value <- mean(df[[job_metric]], na.rm = TRUE)
+
+    div(class="mbox", tags$h5(paste("Avg", job_label)),
+        tags$p(format_metric_values(avg_value, job_metric)))
+  })
+
+  output$box_job_year <- renderUI({
+    df <- comparison_data()
+    div(class="mbox", tags$h5("Job Data Year"),
+        tags$p(paste(unique(df$job_year), collapse = ", ")))
+  })
+
+  output$job_scatter <- renderPlotly({
+    df <- comparison_data()
+    housing_metric <- input$housing_metric
+    job_metric <- input$job_metric
+    housing_label <- metric_label(housing_metric, housing_metric_choices)
+    job_label <- metric_label(job_metric, job_metric_choices)
+
+    df$housing_value <- df[[housing_metric]]
+    df$job_value <- df[[job_metric]]
+    df$tip <- paste0(
+      "<b>", df$county, ", ", df$state, "</b><br>",
+      "ACS ", housing_label, ": ",
+      format_metric_values(df$housing_value, housing_metric), "<br>",
+      "2023 ", job_label, ": ",
+      format_metric_values(df$job_value, job_metric), "<br>",
+      "Rent burden: ", df$rent_to_income, "%"
+    )
+
+    p <- ggplot(df, aes(x = housing_value, y = job_value,
+                        color = rent_to_income, text = tip)) +
+      geom_point(alpha = 0.55, size = 1.4) +
+      geom_smooth(method = "lm", se = FALSE, color = "gray35",
+                  linetype = "dashed", linewidth = 0.6) +
+      scale_color_gradient2(low="#2166ac", mid="#ffffbf", high="#d73027",
+                            midpoint=30, name="Burden %") +
+      scale_x_continuous(labels = axis_label_for(housing_metric)) +
+      scale_y_continuous(labels = axis_label_for(job_metric)) +
+      labs(title = paste("ACS", housing_label, "vs. 2023", job_label),
+           x = paste("ACS", housing_label, input$year_filter),
+           y = paste("2023", job_label)) +
+      theme_minimal(base_size = 11) +
+      theme(plot.title = element_text(face = "bold"))
+
+    ggplotly(p, tooltip = "text") %>%
+      layout(legend = list(orientation="v", x=1.02, y=0.5))
+  })
+
+  output$job_corr_bar <- renderPlotly({
+    df <- comparison_data()
+    housing_metric <- input$housing_metric
+    housing_label <- metric_label(housing_metric, housing_metric_choices)
+
+    corr_df <- data.frame(
+      metric = names(job_metric_choices),
+      variable = unname(job_metric_choices),
+      stringsAsFactors = FALSE
+    )
+
+    corr_df$corr <- vapply(corr_df$variable, function(metric) {
+      complete_rows <- complete.cases(df[[housing_metric]], df[[metric]])
+      if (sum(complete_rows) < 2) {
+        return(NA_real_)
+      }
+      cor(df[[housing_metric]][complete_rows],
+          df[[metric]][complete_rows],
+          use = "complete.obs")
+    }, numeric(1))
+
+    corr_df <- corr_df %>%
+      filter(!is.na(corr))
+
+    req(nrow(corr_df) > 0)
+
+    corr_df$tip <- paste0(
+      "<b>", corr_df$metric, "</b><br>",
+      "Correlation with ", housing_label, ": ",
+      round(corr_df$corr, 3)
+    )
+
+    p <- ggplot(corr_df, aes(x = reorder(metric, corr),
+                             y = corr, fill = corr, text = tip)) +
+      geom_col(width = 0.72) +
+      geom_hline(yintercept = 0, color = "gray45", linewidth = 0.5) +
+      coord_flip() +
+      scale_fill_gradient2(low="#d73027", mid="#f7f7f7", high="#2166ac",
+                           midpoint=0, limits=c(-1, 1), guide="none") +
+      scale_y_continuous(limits = c(-1, 1)) +
+      labs(title = paste("Job-Market Correlations with", housing_label),
+           x = NULL, y = "Pearson correlation") +
+      theme_minimal(base_size = 10) +
+      theme(plot.title = element_text(face = "bold"),
+            axis.text.y = element_text(size = 8))
+
+    ggplotly(p, tooltip = "text")
+  })
+
+  output$job_tbl <- renderDT({
+    df <- comparison_data()
+    req(nrow(df) > 0)
+
+    table_df <- df %>%
+      transmute(
+        County = paste0(county, ", ", state),
+        `ACS Year` = as.integer(input$year_filter),
+        `Monthly Rent` = median_rent,
+        `ACS Household Income` = median_income,
+        `Rent Burden (%)` = rent_to_income,
+        `2023 Avg Annual Pay` = avg_annual_pay,
+        `2023 Avg Weekly Wage` = avg_weekly_wage,
+        `2023 Unemployment (%)` = unemployment_rate,
+        `2023 Employment` = total_employment,
+        `2023 Establishments` = num_establishments,
+        `2023 Location Quotient` = location_quotient_employment
+      )
+
+    datatable(
+      table_df,
+      rownames = FALSE,
+      filter = "top",
+      options = list(pageLength = 12, scrollX = TRUE,
+                     order = list(list(4, "desc")))
+    ) %>%
+      formatCurrency(
+        c("Monthly Rent", "ACS Household Income",
+          "2023 Avg Annual Pay", "2023 Avg Weekly Wage"),
+        currency = "$", digits = 0
+      ) %>%
+      formatRound(c("Rent Burden (%)", "2023 Unemployment (%)"), digits = 1) %>%
+      formatRound("2023 Location Quotient", digits = 2) %>%
+      formatRound(c("2023 Employment", "2023 Establishments"), digits = 0) %>%
+      formatStyle(
+        "Rent Burden (%)",
+        background = styleColorBar(c(0, 80), "#f8d7da"),
+        backgroundSize = "100% 90%",
+        backgroundRepeat = "no-repeat",
+        backgroundPosition = "center"
       )
   })
 }
